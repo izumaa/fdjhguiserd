@@ -1,0 +1,604 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
+local Players = game:GetService("Players")
+local SpinEvent = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("SpinEvent")
+local AuraDataModule = require(ReplicatedStorage:WaitForChild("AuraData"))
+local DataStoreService = game:GetService("DataStoreService")
+
+local InventoryDataStore = DataStoreService:GetDataStore("InventorySave1")
+local Config = require(ReplicatedStorage.Config)
+local webhookModule = require(game.ReplicatedStorage.WebhookService)
+local dataManager = require(ServerScriptService:WaitForChild("Modules"):WaitForChild("DataManager"))
+local AuraHandler = require(game.ServerScriptService.AuraHandler)
+
+local url = Config.WebhookURL
+local MAX_RETRIES = 1
+local RETRY_DELAY = 5
+
+local isOnBlackFrame = Config.IsOnBlackFrame
+
+local function ChooseAura(auras, player)
+	if #auras == 0 then
+		return nil
+	end
+
+    local luck = player:GetAttribute("Luck") or 1
+	local totalEntries = 0
+	local adjustedEntries = {}
+	
+	
+	
+	
+	
+	for _, aura in pairs(auras) do
+		local adjustedChance = aura.Chance ^ (1 / luck)
+		table.insert(adjustedEntries, 1 / adjustedChance)
+		totalEntries += 1 / adjustedChance
+	end
+
+	local randomEntry = math.random() * totalEntries
+	local cumulativeEntry = 0
+
+	for index, aura in pairs(auras) do
+		cumulativeEntry += adjustedEntries[index]
+		if randomEntry <= cumulativeEntry then
+			player:SetAttribute("SelectedAura", aura.Name)
+			return aura.Name, aura.Chance, aura.TextColor, aura.TextFont
+		end
+	end
+
+	return auras[1].Name, auras[1].Chance, auras[1].TextColor, auras[1].TextFont
+end
+
+local function retryOperation(operation, ...)
+	local attempts = 0
+	while attempts < MAX_RETRIES do
+		local success, result = pcall(operation, ...)
+		if success then
+			return true, result
+		else
+			warn(result)
+			attempts = attempts + 1
+			wait(RETRY_DELAY)
+		end
+	end
+end
+
+
+local function saveAuras(player)
+	local aurasFolder = player:FindFirstChild("AurasFolder")
+	if not aurasFolder then
+		warn("AuraFolder not found for player " .. player.Name)
+		return
+	end
+	
+	local auras = aurasFolder:GetChildren()
+	
+	local auraNames = {}
+
+
+	for _, aura in ipairs(auras) do
+		if aura:IsA("StringValue") then
+			table.insert(auraNames, aura.Name)
+		end
+	end
+	
+	local success, errorMsg = retryOperation(function()
+		InventoryDataStore:SetAsync(player.UserId, auraNames)
+		print("Saved")
+	end)
+	
+	if not success then
+		warn("Failed to save aura for player " .. player.Name .. ": " .. errorMsg)
+	end
+end
+
+local function loadAuras(player)
+	local success, auraNames = retryOperation(function()
+		return InventoryDataStore:GetAsync(player.UserId)
+	end)
+
+	if success and auraNames then
+		local aurasFolder = player:FindFirstChild("AurasFolder")
+		if not aurasFolder then
+			aurasFolder = Instance.new("Folder", player)
+			aurasFolder.Name = "AurasFolder"
+		end
+		
+		for _, auraName in ipairs(auraNames) do
+			if not aurasFolder:FindFirstChild(auraName) then
+				local stringValue = Instance.new("StringValue")
+				stringValue.Value = auraName
+				stringValue.Name = auraName
+				stringValue.Parent = aurasFolder
+			end
+		end
+		print("Loaded")
+		game.ReplicatedStorage.Remotes.AuraData:FireClient(player, auraNames)
+	elseif not success then
+		warn("Failed to load aura for player" .. player.Name)
+	end
+end
+
+local function updateRolls(player)
+	local profile = dataManager.Profiles[player]
+	
+	profile.Data.Rolls = (profile.Data.Rolls or 0) + 1
+	player.leaderstats.Rolls.Value = profile.Data.Rolls
+end
+
+local function updateMaxRolls(player, price)
+	local profile = dataManager.Profiles[player]
+
+	profile.Data.MaxAura = (profile.Data.MaxAura or 5) + 1
+	player.MaxAura.Value = profile.Data.MaxAura
+
+	profile.Data.ExpandPrice = (profile.Data.ExpandPrice or 1000) * 3
+	player.ExpandPrice.Value = profile.Data.ExpandPrice 
+
+	profile.Data.Cash = (profile.Data.Cash or 1000)
+	player.Cash.Value = profile.Data.Cash - price
+end
+
+local function DetermineColor(chance)
+	if chance <= 4999 then
+		return Color3.fromRGB(160, 32, 240)
+	elseif chance <= 49999 then
+		return Color3.fromRGB(255, 255, 0)
+	else
+		return Color3.fromRGB(255, 165, 0)
+	end
+end
+
+local function showRandomAuras(player, duration, label,rngLabel,startRngPos,endRngPos, startPosition, endPosition)
+	local playerGui = player:WaitForChild("PlayerGui")
+	local auras = AuraDataModule.Auras
+	local frame2 = playerGui.SettingsUI
+	local frame3 = playerGui.AdminUI
+	local frame4 = playerGui.StorageUI
+	local frame5 = playerGui.Collection
+	local frame6 = playerGui.MainUI
+	local SettingButton = frame2.TextButton
+	local AdminButton = frame3.TextButton
+	local StorageButton = frame4.TextButton
+	local CollectionButton = frame5.TextButton
+	local Currencys = frame6.Currencys
+	
+	SettingButton.Visible = false
+	AdminButton.Visible = false
+	StorageButton.Visible = false
+	CollectionButton.Visible = false
+	Currencys.Visible = false
+
+	local shuffledAuras = {}
+	for _, aura in pairs(auras) do
+		table.insert(shuffledAuras, aura)
+	end
+	for i = #shuffledAuras, 2, -1 do
+		local j = math.random(i)
+		shuffledAuras[i], shuffledAuras[j] = shuffledAuras[j], shuffledAuras[i]
+	end
+
+	for _, aura in ipairs(shuffledAuras) do
+		label.Text = aura.Name
+		label.TextColor3 = aura.TextColor
+		label.Font = aura.TextFont
+		rngLabel.Text = "1 in ".. tostring(aura.Chance)
+
+		label.Position = startPosition 
+		rngLabel.Position = startRngPos 
+
+		local tweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+		local tween = game:GetService("TweenService"):Create(label, tweenInfo, {Position = endPosition})
+		tween:Play()
+		
+		local rngLabelTweenInfo = TweenInfo.new(duration, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+		local rngLabelTween = game:GetService("TweenService"):Create(rngLabel, rngLabelTweenInfo, {Position = endRngPos})
+		rngLabelTween:Play()
+
+		ReplicatedStorage.Remotes.PlaySound:FireClient(player, "Tick")
+		
+		wait(duration)
+		
+	end
+	
+end
+
+local function createEmbed(player, name, chance)
+	local req = webhookModule:new()
+
+	req.Title = "Congrats! A VERY RARE Aura just got pulled! 🎊"
+		req.Description = player.DisplayName.." (@"..player.Name..") just pulled a **"..name.."** aura (1 in "..chance..")!\n\n"
+		req.Color = webhookModule.colors.black
+		req.Thumbnail = "https://discord.com/api/webhooks/1213652305346560062/P3g-Ag0O7PXiCoBY2ZqKejy5Noat7OcOoiOifsaDkUK_hu0mQgR3CWw5EbLxZOPYk1LJ"
+		req.Footer = "Vox's RNG"
+		req.TimeStamp = DateTime.now():ToIsoDate()
+		req.Content = "Something rare occurred..."
+
+		req.Fields = {
+			{
+				['name'] = "Aura stats",
+				['value'] = "Name: "..name.."\nChance: 1 in "..chance,
+				['inline'] = false
+			},
+
+			{
+				['name'] = "Player Data",
+				['value'] = "Name: "..player.DisplayName.." (@"..player.Name..")\nRolls: "..player.leaderstats.Rolls.Value,
+				['inline'] = false
+			}
+		}
+
+		req:sendEmbed(url)
+		
+	
+end
+
+function ShowSkipFrame(player, ActualFrame, cdFrame, frame, SkipButton, cd)
+	ActualFrame.Visible = false
+	player:SetAttribute("OnCooldown", true)
+
+	cdFrame.Visible = true
+	cdFrame:TweenSize(UDim2.new(0,0,1,0), "Out", "Linear", cd, true)
+
+	ActualFrame.Visible = false
+	frame.Visible = false
+
+	task.wait(cd)
+
+	cdFrame.Visible = false
+	cdFrame.Size = UDim2.new(1, 0, 1, 0)
+
+	player:SetAttribute("OnCooldown", false)
+
+	SkipButton.Active = true
+end
+
+SpinEvent.OnServerEvent:Connect(function(player)
+	if player:GetAttribute("OnCooldown") then
+		return
+	end
+
+	local displayDuration
+	if player:GetAttribute("Quick") then
+		displayDuration = Config.QuickDisplayDuration
+	else
+		displayDuration = Config.NormalDisplayDuration
+	end
+
+	local startPosition = UDim2.new(0.5, 0,0.5, 0) 
+	local startRngPosition = UDim2.new(0.5, 0,0.45, 0)
+	local endRngPosition = UDim2.new(0.5, 0, 0.38, 0)
+	local endPosition = UDim2.new(0.5, 0, 0.46, 0)  
+
+	player:SetAttribute("OnCooldown", true)
+
+	local auraname, aurachance, auratextcolor, auratextfont = ChooseAura(AuraDataModule.Auras, player)
+
+	player:SetAttribute("AuraName", auraname)
+
+	local cd = player:GetAttribute("SpinCooldown")
+
+	if auraname and aurachance and auratextcolor and auratextfont then
+		local playerGui = player:WaitForChild("PlayerGui")
+		local frame = playerGui.SpinUI.ChooseFrame
+		local frame2 = playerGui.SettingsUI
+		local frame3 = playerGui.AdminUI
+		local frame4 = playerGui.StorageUI
+		local frame5 = playerGui.Collection
+		local frame6 = playerGui.MainUI
+		if frame.Visible then return end
+		frame.Visible = false
+		local SkipButton = frame.Skip
+		local EquipButton = frame.Equip
+		local ObtaimentLabel:TextLabel = frame.ObtainmentLabel
+		local RNGLabel = frame.RNGLabel
+		local cdFrame = frame.Parent.SpinButton.CooldownFrame
+		local SkipWarning = frame.Parent.SkipWarningFrame
+		local SettingButton = frame2.TextButton
+		local AdminButton = frame3.TextButton
+		local StorageButton = frame4.TextButton
+		local CollectionButton = frame5.TextButton
+		local Currencys = frame6.Currencys
+
+
+
+		local blackScreenFrame = playerGui.SpinUI.BlackFrame
+		local vignette: ImageLabel = blackScreenFrame.vignette
+		local Star = blackScreenFrame.Star
+
+		updateRolls(player)
+
+		if aurachance >= isOnBlackFrame then
+			frame.Visible = true
+			EquipButton.Visible = false
+			SkipButton.Visible = false
+			SettingButton.Visible = false
+			AdminButton.Visible = false
+			StorageButton.Visible = false
+			CollectionButton.Visible = false
+			Currencys.Visible = false
+			
+			showRandomAuras(player, displayDuration, ObtaimentLabel,RNGLabel,startRngPosition, endRngPosition, startPosition, endPosition)
+			task.wait(displayDuration)
+			blackScreenFrame.Visible = true
+			SettingButton.Visible = false
+			
+			ReplicatedStorage.Remotes.PlaySound:FireClient(player, "Boom")
+
+			vignette.ImageTransparency = 1
+			vignette.ImageColor3 = auratextcolor
+
+			Star.ImageColor3 = auratextcolor
+			Star.Visible = true
+			Star.ImageTransparency = 1
+
+			Star:TweenSize(UDim2.new(0.5,0,0.5,0))
+			game.TweenService:Create(vignette, TweenInfo.new(3.4), {ImageTransparency = 0.8}):Play()
+			game.TweenService:Create(Star,TweenInfo.new(3.4), {Rotation = 1580, ImageTransparency = 0}):Play()
+
+			task.wait(3.4)
+
+			blackScreenFrame.Visible = false
+			EquipButton.Visible = true
+			SkipButton.Visible = true
+			
+			ReplicatedStorage.Remotes.PlaySound:FireClient(player, "BoomEnd")
+			game.ReplicatedStorage.Remotes.CamShakeEvent:FireClient(player)
+
+			Star.Rotation = 0
+			Star.Size = UDim2.new(0,0,0,0)
+			
+			local autoEquips = player.AutoEquip.Value
+
+			if autoEquips > 0 then
+				if aurachance >= autoEquips then
+					
+					local message
+					local color = DetermineColor(aurachance)
+					if aurachance >= Config.GlobalMessageThreshold then
+						message = string.format(Config.Messages.GlobalFormat, player.Name, auraname, tostring(aurachance))
+						ReplicatedStorage.Remotes.Messages.Global:FireAllClients(message, color)
+					else
+						message = string.format(Config.Messages.ServerFormat, player.Name, auraname, tostring(aurachance))
+						ReplicatedStorage.Remotes.Messages.Server:FireAllClients(message, color)
+					end
+					
+					EquipButton.Active = false
+					AuraHandler.UnequipAll(player, player.Character)
+
+
+					if auraname ~= nil then
+						AuraHandler.EquipAura(player, player.Character)
+						print(auraname)
+					end
+
+					ObtaimentLabel.Text = ""
+					RNGLabel.Text = ""
+
+					player:SetAttribute("OnCooldown", true)
+
+					cdFrame.Visible = true
+					cdFrame:TweenSize(UDim2.new(0,0,1,0), "Out", "Linear", cd, true)
+
+					frame.Visible = false
+
+					task.wait(cd)
+
+					cdFrame.Visible = false
+					cdFrame.Size = UDim2.new(1, 0, 1, 0)
+
+					player:SetAttribute("OnCooldown", false)
+
+
+					auraname = nil
+					player:SetAttribute("SelectedAura", nil)
+
+					EquipButton.Active = true
+
+					return
+				end
+			end
+		else
+			frame.Visible = true
+			EquipButton.Visible = false
+			SkipButton.Visible = false
+			
+			
+			showRandomAuras(player, displayDuration, ObtaimentLabel,RNGLabel,startRngPosition,endRngPosition, startPosition, endPosition)
+			task.wait(displayDuration)
+			
+			local autoEquips = player.AutoEquip.Value
+
+			if autoEquips > 0 then
+				if aurachance >= autoEquips then
+					local message
+					local color = DetermineColor(aurachance)
+					if aurachance >= Config.GlobalMessageThreshold then
+						message = string.format(Config.Messages.GlobalFormat, player.Name, auraname, tostring(aurachance))
+						ReplicatedStorage.Remotes.Messages.Global:FireAllClients(message, color)
+					else
+						message = string.format(Config.Messages.ServerFormat, player.Name, auraname, tostring(aurachance))
+						ReplicatedStorage.Remotes.Messages.Server:FireAllClients(message, color)
+					end
+					
+					EquipButton.Active = false
+					AuraHandler.UnequipAll(player, player.Character)
+
+
+					if auraname ~= nil then
+						AuraHandler.EquipAura(player, player.Character)
+						print(auraname)
+					end
+
+					ObtaimentLabel.Text = ""
+					RNGLabel.Text = ""
+
+					player:SetAttribute("OnCooldown", true)
+
+					cdFrame.Visible = true
+					cdFrame:TweenSize(UDim2.new(0,0,1,0), "Out", "Linear", cd, true)
+
+					frame.Visible = false
+
+					task.wait(cd)
+
+					cdFrame.Visible = false
+					cdFrame.Size = UDim2.new(1, 0, 1, 0)
+
+					player:SetAttribute("OnCooldown", false)
+
+
+					auraname = nil
+					player:SetAttribute("SelectedAura", nil)
+
+					EquipButton.Active = true
+
+					return
+				end
+			end
+			
+			EquipButton.Visible = true
+			SkipButton.Visible = true
+		end	
+		
+		
+		
+		ObtaimentLabel.Text = "You Obtained:" .. tostring(auraname)
+		ObtaimentLabel.TextColor3 = auratextcolor
+		ObtaimentLabel.Font = auratextfont
+
+		RNGLabel.Text = "1 in " .. tostring(aurachance)
+
+		SkipButton.MouseButton1Click:Connect(function()
+			SkipWarning.Visible = true
+			SkipWarning.Yes.MouseButton1Click:Connect(function()
+				ShowSkipFrame(player, SkipWarning, cdFrame, frame, SkipButton, cd)
+				SettingButton.Visible = true
+				AdminButton.Visible = true
+				StorageButton.Visible = true
+				CollectionButton.Visible = true
+				Currencys.Visible = true
+			end)
+			SkipWarning.No.MouseButton1Click:Connect(function()
+				SkipWarning.Visible = false
+				frame.Visible = true
+				
+			end)
+			
+			
+		end)
+
+		EquipButton.MouseButton1Click:Once(function()
+			EquipButton.Active = false
+
+			AuraHandler.UnequipAll(player, player.Character)
+
+
+			if auraname ~= nil then
+				AuraHandler.EquipAura(player, player.Character)
+				print(auraname)
+			end
+
+			ObtaimentLabel.Text = ""
+			RNGLabel.Text = ""
+
+			player:SetAttribute("OnCooldown", true)
+
+			cdFrame.Visible = true
+			cdFrame:TweenSize(UDim2.new(0,0,1,0), "Out", "Linear", cd, true)
+			
+			for _, auraOwned in pairs(player:FindFirstChild("AurasOwned"):GetChildren()) do
+				if auraname == auraOwned.Name then
+					auraOwned.Value = true
+				end
+			end
+
+			frame.Visible = false
+			SettingButton.Visible = true
+			AdminButton.Visible = true
+			StorageButton.Visible = true
+			CollectionButton.Visible = true
+			Currencys.Visible = true
+			
+			
+			task.delay(0.2, function()
+				if player.Character:FindFirstChild("AURA"):FindFirstChildOfClass("Folder") then
+					local aura = player.Character:FindFirstChild("AURA"):FindFirstChildWhichIsA("Folder")
+
+					ReplicatedStorage.Remotes.Store:FireClient(player, aura.Name)
+
+					local existingString = player.AurasFolder:FindFirstChild(aura.Name)
+					if existingString then
+						existingString:Destroy()
+					end
+
+					local stringValue = Instance.new("StringValue", player.AurasFolder)
+					stringValue.Value = aura.Name
+					stringValue.Name = aura.Name
+				end
+			end)
+			
+
+
+			task.wait(cd)
+
+			cdFrame.Visible = false
+			cdFrame.Size = UDim2.new(1, 0, 1, 0)
+
+			player:SetAttribute("OnCooldown", false)
+
+
+			auraname = nil
+			player:SetAttribute("SelectedAura", nil)
+
+			EquipButton.Active = true
+
+		end)
+
+		local message
+		local color = DetermineColor(aurachance)
+		if aurachance >= Config.GlobalMessageThreshold then
+			message = string.format(Config.Messages.GlobalFormat, player.Name, auraname, tostring(aurachance))
+			ReplicatedStorage.Remotes.Messages.Global:FireAllClients(message, color)
+		else
+			message = string.format(Config.Messages.ServerFormat, player.Name, auraname, tostring(aurachance))
+			ReplicatedStorage.Remotes.Messages.Server:FireAllClients(message, color)
+		end
+
+		task.delay(0, function()
+			createEmbed(player, auraname, aurachance)
+		end)
+
+		
+		return
+	else
+		player:SetAttribute("OnCooldown", false)
+		return
+	end
+end)
+
+game.Players.PlayerRemoving:Connect(function(player)
+	saveAuras(player)
+end)
+
+game.Players.PlayerAdded:Connect(function(player)
+	loadAuras(player)
+end)
+
+ReplicatedStorage.Remotes.DeleteAuraData.OnServerEvent:Connect(function(player, auraName)
+	local aurasFolder = player:FindFirstChild("AurasFolder")
+	if aurasFolder then
+
+		local auraString = aurasFolder:FindFirstChild(auraName)
+		if auraString then
+			auraString:Destroy()
+		end
+	end
+end)
+
+ReplicatedStorage.Remotes.SaveMaxAura.OnServerEvent:Connect(function(player, price)
+	if player.Cash.Value >= price then
+		updateMaxRolls(player, price) 
+	end
+end)
